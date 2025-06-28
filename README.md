@@ -28,11 +28,11 @@ A simple event-driven microservices project built with Go, Redis, and RabbitMQ. 
 +--------+         +-------------+         +------------------+         +----------------------+  
                          |                          |                                   
                          v                          v                                   
-                     +-------+                  +--------+                              
-                     | Redis |                  | Redis  |                              
-                     | (idemp|                  |(inventory &                           
+                     +----------+               +--------------+                              
+                     | Redis    |               | Redis        |                              
+                     | (idemp   |               |(inventory &  |                         
                      |  & cache)|               | notification)|                         
-                     +-------+                  +--------+                              
+                     +----------+               +--------------+                              
 
 Optional Dashboard Service reads metrics from Redis and serves via HTTP.
 ```
