@@ -31,34 +31,52 @@ func init() {
 	}
 
 	// Connect to Redis
-	rdb = redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-	// if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	log.Println("Connecting to Redis at", redisAddr)
+	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
 	_, err := rdb.Ping(context.Background()).Result()
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-	// Connect to RabbitMQ
-	// Use environment variable to switch between RabbitMQ instances
-	rabbitmqHost := "localhost:5672" // Default to primary instance
+	// Connect to RabbitMQ with retry logic
+	connectToRabbitMQ()
+
+	err = ch.ExchangeDeclare("orders.direct", "direct", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Failed to declare an exchange: %v", err)
+	}
+}
+
+func connectToRabbitMQ() {
+	var conn *amqp.Connection
+	var err error
+	rabbitmqHost := "rabbitmq1:5672" // Default to primary instance
 	if os.Getenv("RABBITMQ_ENV") == "test" {
-		rabbitmqHost = "localhost:5673" // Use secondary instance for testing
+		rabbitmqHost = "rabbitmq2:5672" // Use secondary instance for testing
 		log.Println("Using TEST RabbitMQ instance")
 	}
 
-	conn, err := amqp.Dial("amqp://guest:guest@" + rabbitmqHost + "/")
+	// Retry connecting to RabbitMQ with exponential backoff
+	for i := 0; i < 5; i++ {
+		conn, err = amqp.Dial("amqp://guest:guest@" + rabbitmqHost + "/")
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ, retrying in %d seconds...", 2*(i+1))
+		time.Sleep(time.Duration(2*(i+1)) * time.Second)
+	}
+
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after multiple retries: %v", err)
 	}
 
 	ch, err = conn.Channel()
 	if err != nil {
 		log.Fatalf("Failed to open a channel: %v", err)
-	}
-
-	err = ch.ExchangeDeclare("orders.direct", "direct", true, false, false, false, nil)
-	if err != nil {
-		log.Fatalf("Failed to declare an exchange: %v", err)
 	}
 }
 

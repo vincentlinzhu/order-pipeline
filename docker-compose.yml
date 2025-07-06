@@ -1,24 +1,62 @@
-version: '3.8'
+# The 'networks' section allows containers to communicate with each other
+# over a dedicated virtual network, using their hostnames as DNS entries.
+networks:
+  order_pipeline_net:
+    driver: bridge
+
 services:
   rabbitmq1:
     image: rabbitmq:3-management
+    # 'hostname' gives the container a stable name within the Docker network.
+    # Other containers can reach it by using the name 'rabbitmq1'.
+    hostname: rabbitmq1
     ports:
+      # Host Port : Container Port
+      # We expose the main AMQP port for our Go app to connect.
       - "5672:5672"
+      # We expose the management UI port to view the cluster status.
       - "15672:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      # This is the 'secret handshake' for the cluster.
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    networks:
+      - order_pipeline_net
 
   rabbitmq2:
     image: rabbitmq:3-management
+    hostname: rabbitmq2
     ports:
       - "5673:5672"
       - "15673:15672"
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - order_pipeline_net
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    networks:
+      - order_pipeline_net
+
+  # --- API Gateway (Now connected to the network) ---
+  api-gateway:
+    # 'build' tells Docker to build the image from the Dockerfile in this directory.
+    # We need this so our Go app is part of the same Docker network.
+    build: ./api-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      - rabbitmq1
+      - rabbitmq2
+      - redis
+    networks:
+      - order_pipeline_net
+    # We can still use the .env file for configuration.
+    env_file:
+      - ./api-gateway/.env
+    volumes:
+      - ./api-gateway/.env:/app/.env:ro
