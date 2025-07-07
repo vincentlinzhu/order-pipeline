@@ -2,6 +2,10 @@
 
 A simple event-driven microservices project built with Go, Redis, and RabbitMQ. This pipeline demonstrates how to handle HTTP requests, perform idempotency checks, process messages asynchronously, and maintain cache state—all with best practices for reliability and scalability.
 
+Next Steps:
+- Add a network layer (an http server). Ask Wangster about this?
+- Change docker compose to Kubernetes for more modern approach to this architecture.
+
 ## Table of Contents
 
 * [System Architecture](#system-architecture)
@@ -75,91 +79,103 @@ order-pipeline/
 
 ## Running Locally
 
-Each service can be run independently. For example, to start the API Gateway:
+The entire application stack, including the Go services, can be started with a single command:
 
 ```bash
-cd api-gateway
-go run main.go
+# This will build the Go services and start all containers.
+docker-compose up --build
 ```
 
 By default:
-
-* API Gateway listens on port **8080**
-* Order Processor and Notifier connect to RabbitMQ at **amqp\://guest\:guest\@localhost:5672** and Redis at **localhost:6379**
+*   API Gateway is exposed on port **8080** on your local machine.
+*   The RabbitMQ Management UI is available at [http://localhost:15672](http://localhost:15672) and [http://localhost:15673](http://localhost:15673).
+*   All services communicate with each other over a dedicated Docker network.
 
 ## Service Overview
 
 ### API Gateway
 
-* **Endpoint:** `POST /orders`
-* **Responsibilities:**
-
-  * Parse & validate JSON payload
-  * Enforce idempotency via Redis `SETNX`
-  * Publish order messages to RabbitMQ exchange `orders.direct`
+*   **Endpoint:** `POST /orders`
+*   **Responsibilities:**
+    *   Parse & validate JSON payload
+    *   Enforce idempotency via Redis `SETNX`
+    *   Publish order messages to RabbitMQ exchange `orders.direct`
 
 ### Order Processor
 
-* **Consumes:** `orders.queue` bound to `orders.direct`
-* **Responsibilities:**
-
-  * Manual ACK/NACK for reliability
-  * Decrement inventory in Redis (`DECRBY`)
-  * Publish `order.created` events to `orders.topic`
+*   **Consumes:** `orders.queue` bound to `orders.direct`
+*   **Responsibilities:**
+    *   Manual ACK/NACK for reliability
+    *   Decrement inventory in Redis (`DECRBY`)
+    *   Publish `order.created` events to `orders.topic`
 
 ### Notification Service
 
-* **Consumes:** `notifier.queue` bound to `orders.topic` routing key `order.created`
-* **Responsibilities:**
-
-  * Exactly-once delivery via Redis `SETNX`
-  * Simulate sending notification (log/email stub)
-  * Record status in Redis hash
+*   **Consumes:** `notifier.queue` bound to `orders.topic` routing key `order.created`
+*   **Responsibilities:**
+    *   Exactly-once delivery via Redis `SETNX`
+    *   Simulate sending notification (log/email stub)
+    *   Record status in Redis hash
 
 ### Dashboard (Optional)
 
-* **Endpoint:** `GET /metrics`
-* **Responsibilities:**
+*   **Endpoint:** `GET /metrics`
+*   **Responsibilities:**
+    *   Fetch cached metrics from Redis (order count, inventory levels, notification status)
+    *   Serve JSON response for monitoring
 
-  * Fetch cached metrics from Redis (order count, inventory levels, notification status)
-  * Serve JSON response for monitoring
+## High Availability and Resilience
+
+The API Gateway has been designed to be highly resilient to failures in its downstream dependencies, specifically RabbitMQ.
+
+### Key Features:
+
+*   **Automatic Failover:** The gateway is configured with a list of RabbitMQ nodes. If the primary node it's connected to fails, it will automatically detect the disconnection and begin attempting to connect to the next available node in the list.
+*   **Persistent Retries:** If all RabbitMQ nodes are unavailable, the gateway enters a persistent retry loop. It will continuously try to reconnect to the list of servers with a backoff period, ensuring that it will automatically recover its connection as soon as a RabbitMQ node becomes available again.
+*   **Synchronous Startup:** The service will not start listening for HTTP traffic until it has successfully established an initial connection to RabbitMQ. This prevents the service from accepting requests that it cannot process.
+*   **Thread-Safe Connection Management:** A background goroutine manages the connection state, and access to the shared RabbitMQ channel is protected by a `sync.RWMutex` to prevent data races during reconnection events.
+
+This setup ensures that the API Gateway can survive temporary network partitions or RabbitMQ service restarts without requiring a manual restart itself.
 
 ## Testing & CI
 
-* Unit tests with mocks (interfaces for RabbitMQ/Redis)
-* Integration tests via \[Testcontainers-Go]
-* GitHub Actions workflow spins up Redis & RabbitMQ services, then runs `go test ./...`
+*   Unit tests with mocks (interfaces for RabbitMQ/Redis)
+*   Integration tests via \[Testcontainers-Go]
+*   GitHub Actions workflow spins up Redis & RabbitMQ services, then runs `go test ./...`
 
 ## Deployment
 
-1. Add Dockerfiles to each service:
+The project is configured to run using Docker Compose, which builds and manages the Go services alongside their dependencies.
 
-   ```dockerfile
-   FROM golang:1.20-alpine AS build
-   WORKDIR /app
-   COPY . .
-   RUN go build -o service
+### Containerization Strategy
 
-   FROM alpine:latest
-   COPY --from=build /app/service /usr/local/bin/service
-   ENTRYPOINT ["/usr/local/bin/service"]
-   ```
-2. Update `docker-compose.yml` to build each service:
+The `api-gateway` service is fully containerized and managed by `docker-compose`. It is built from its `Dockerfile` and run as a service, connected to the same network as RabbitMQ and Redis. This is the recommended approach for local development and testing.
 
-   ```yaml
-   services:
-     api-gateway:
-       build: ./api-gateway
-       ports: ['8080:8080']
-       depends_on: [rabbitmq, redis]
-     order-processor:
-       build: ./order-processor
-       depends_on: [rabbitmq, redis]
-     notifier:
-       build: ./notifier
-       depends_on: [rabbitmq, redis]
-   ```
-3. For production, deploy to a Docker host or Kubernetes cluster. Consider using Redis Sentinel/Cluster and RabbitMQ clustering for HA.
+The `order-processor` and `notifier` services can be containerized following the same pattern. The `docker-compose.yml` would be updated to include build configurations for them:
+
+```yaml
+# Example for extending docker-compose.yml
+services:
+  # ... existing services
+  api-gateway:
+    build: ./api-gateway
+    ports: ['8080:8080']
+    depends_on: [rabbitmq1, rabbitmq2, redis]
+    environment:
+      - RABBITMQ_URLS=amqp://guest:guest@rabbitmq1:5672/,amqp://guest:guest@rabbitmq2:5672/
+
+  order-processor:
+    build: ./order-processor
+    depends_on: [rabbitmq1, rabbitmq2, redis]
+    # No ports needed as it's a background worker
+
+  notifier:
+    build: ./notifier
+    depends_on: [rabbitmq1, rabbitmq2, redis]
+    # No ports needed as it's a background worker
+```
+
+For a production environment, this setup can be deployed to a Docker host or adapted for a Kubernetes cluster. For true production-grade high availability, consider using Redis Sentinel/Cluster and a managed RabbitMQ clustering solution.
 
 ## Best Practices
 
