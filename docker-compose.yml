@@ -44,8 +44,6 @@ services:
 
   # --- API Gateway (Now connected to the network) ---
   api-gateway:
-    # 'build' tells Docker to build the image from the Dockerfile in this directory.
-    # We need this so our Go app is part of the same Docker network.
     build: ./api-gateway
     ports:
       - "8080:8080"
@@ -55,8 +53,17 @@ services:
       - redis
     networks:
       - order_pipeline_net
-    # We can still use the .env file for configuration.
     env_file:
-      - ./api-gateway/.env
-    volumes:
-      - ./api-gateway/.env:/app/.env:ro
+      - ./.env
+
+  # --- Order Processor ---
+  order-processor:
+    build: ./order-processor
+    depends_on:
+      - rabbitmq1
+      - rabbitmq2
+      - redis
+    networks:
+      - order_pipeline_net
+    env_file:
+      - ./.env
