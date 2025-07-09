@@ -3,7 +3,8 @@
 A simple event-driven microservices project built with Go, Redis, and RabbitMQ. This pipeline demonstrates how to handle HTTP requests, perform idempotency checks, process messages asynchronously, and maintain cache state—all with best practices for reliability and scalability.
 
 Next Steps:
-- Add a proper database like CassandraBD and use a cache scheme (aside, read back, write around, write through, etc) to interact with the redis cache.
+- Maybe add a load balancer if needed?
+- Add a proper database like PostgreSQL or Cassandra DB and use a cache scheme (aside, read back, write around, write through, etc) to interact with the redis cache.
 - Add a network layer (an http server). Ask Wangster about this?
 - Change docker compose to Kubernetes for more modern approach to this architecture.
 
