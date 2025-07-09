@@ -184,6 +184,15 @@ Duplicate order
 
 This confirms that the system correctly identified and rejected the duplicate request based on the order `id`.
 
+### Shutdown the application
+
+To shut down the application, press `Ctrl+C` in the terminal where `docker-compose up` is running. This will stop the containers. After that, run the following command to remove the containers and networks created by `docker-compose`:
+
+```bash
+docker-compose down
+```
+
+
 
 ## Service Overview
 
