@@ -92,7 +92,8 @@ By default:
 *   The RabbitMQ Management UI is available at [http://localhost:15672](http://localhost:15672) and [http://localhost:15673](http://localhost:15673).
 *   All services communicate with each other over a dedicated Docker network.
 
-### Interacting with the Redis Data Store
+
+### Interacting with the Redis Datastore
 
 You can directly interact with the Redis container to inspect or modify data. First, find the container name:
 
@@ -109,22 +110,22 @@ Then, use the container name in the following commands.
 docker exec <container-name> redis-cli KEYS "*"
 
 # Check the data type of a key (e.g., "string", "hash")
-docker exec <container-name> redis-cli TYPE inventory:ABC
+docker exec <container-name> redis-cli TYPE <key>
 
 # Delete a key
-docker exec <container-name> redis-cli DEL inventory:ABC
+docker exec <container-name> redis-cli DEL <key>
 ```
 
 **Inventory Commands**
 ```bash
 # Get the current inventory for a specific SKU
-docker exec <container-name> redis-cli GET inventory:ABC
+docker exec <container-name> redis-cli GET <key>
 
 # Manually set the inventory for a SKU
-docker exec <container-name> redis-cli SET inventory:ABC 100
+docker exec <container-name> redis-cli SET <key> 100
 
 # Increase the inventory for a SKU by 10
-docker exec <container-name> redis-cli INCRBY inventory:ABC 10
+docker exec <container-name> redis-cli INCRBY <key> 10
 ```
 
 **Idempotency Key Commands**
@@ -135,6 +136,54 @@ docker exec <container-name> redis-cli KEYS "idemp:*"
 # Check the remaining time-to-live (in seconds) of an idempotency key
 docker exec <container-name> redis-cli TTL idemp:order123
 ```
+
+### Fill in the inventory of a product:
+
+Let's say we have an item "mag-safe-phone-case". We want the item to be in out inventory, so we can use these commands to set up the inventory for our test item.
+
+```bash
+docker exec order-pipeline-redis-1 redis-cli SET inventory:mag-safe-phone-case 100
+```
+```bash
+docker exec order-pipeline-redis-1 redis-cli GET inventory:mag-safe-phone-case
+```
+
+### Placing an Order
+
+You can place an order by sending a `POST` request to the `/orders` endpoint.
+
+**1. Send a New Order**
+
+```bash
+curl -X POST http://localhost:8080/orders \
+     -H "Content-Type: application/json" \
+     -d '{"id":"order123","sku":"mag-safe-phone-case","qty":2}
+```
+
+Expected Output:
+```
+Order received: order123
+```
+
+This indicates the order was accepted by the API Gateway and published for processing.
+
+**2. Send the Same Order Again**
+
+Running the exact same command a second time will trigger the idempotency check.
+
+```bash
+curl -X POST http://localhost:8080/orders \
+     -H "Content-Type: application/json" \
+     -d '{"id":"order123","sku":"mag-safe-phone-case","qty":2}
+```
+
+Expected Output:
+```
+Duplicate order
+```
+
+This confirms that the system correctly identified and rejected the duplicate request based on the order `id`.
+
 
 ## Service Overview
 
