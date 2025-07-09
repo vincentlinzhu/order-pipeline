@@ -3,6 +3,7 @@
 A simple event-driven microservices project built with Go, Redis, and RabbitMQ. This pipeline demonstrates how to handle HTTP requests, perform idempotency checks, process messages asynchronously, and maintain cache state—all with best practices for reliability and scalability.
 
 Next Steps:
+- Add a proper database like CassandraBD and use a cache scheme (aside, read back, write around, write through, etc) to interact with the redis cache.
 - Add a network layer (an http server). Ask Wangster about this?
 - Change docker compose to Kubernetes for more modern approach to this architecture.
 
@@ -90,6 +91,50 @@ By default:
 *   API Gateway is exposed on port **8080** on your local machine.
 *   The RabbitMQ Management UI is available at [http://localhost:15672](http://localhost:15672) and [http://localhost:15673](http://localhost:15673).
 *   All services communicate with each other over a dedicated Docker network.
+
+### Interacting with the Redis Data Store
+
+You can directly interact with the Redis container to inspect or modify data. First, find the container name:
+
+```bash
+# This will output the name, e.g., "order-pipeline-redis-1"
+docker ps --filter "name=redis" --format "{{.Names}}"
+```
+
+Then, use the container name in the following commands.
+
+**General Commands**
+```bash
+# List all keys in the database
+docker exec <container-name> redis-cli KEYS "*"
+
+# Check the data type of a key (e.g., "string", "hash")
+docker exec <container-name> redis-cli TYPE inventory:ABC
+
+# Delete a key
+docker exec <container-name> redis-cli DEL inventory:ABC
+```
+
+**Inventory Commands**
+```bash
+# Get the current inventory for a specific SKU
+docker exec <container-name> redis-cli GET inventory:ABC
+
+# Manually set the inventory for a SKU
+docker exec <container-name> redis-cli SET inventory:ABC 100
+
+# Increase the inventory for a SKU by 10
+docker exec <container-name> redis-cli INCRBY inventory:ABC 10
+```
+
+**Idempotency Key Commands**
+```bash
+# Find all idempotency keys
+docker exec <container-name> redis-cli KEYS "idemp:*"
+
+# Check the remaining time-to-live (in seconds) of an idempotency key
+docker exec <container-name> redis-cli TTL idemp:order123
+```
 
 ## Service Overview
 
