@@ -1,4 +1,4 @@
-module github.com/your-org/order-pipeline/order-processor
+module github.com/vincentlinzhu/order-pipeline/order-processor
 
 go 1.24.4
 

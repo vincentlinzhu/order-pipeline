@@ -3,10 +3,11 @@
 A simple event-driven microservices project built with Go, Redis, and RabbitMQ. This pipeline demonstrates how to handle HTTP requests, perform idempotency checks, process messages asynchronously, and maintain cache state—all with best practices for reliability and scalability.
 
 Next Steps:
-- Maybe add a load balancer if needed?
 - Add a proper database like PostgreSQL or Cassandra DB and use a cache scheme (aside, read back, write around, write through, etc) to interact with the redis cache.
 - Add a network layer (an http server). Ask Wangster about this?
 - Change docker compose to Kubernetes for more modern approach to this architecture.
+- Maybe add a load balancer if needed?
+- I want to incorporate an Agentic webscraper and MCP (connect to proper datastore). Maybe an agentic shopping bot that orders off of Amazon for you. Maybe change decrement inventory to increment a shopping list. Use AI to handle natural language conversion of user input to actual item on Amazon. This will probably require user authentication, so each user can have an orders list. We want to keep the CLI for the oders through to be techy ;)
 
 ## Table of Contents
 

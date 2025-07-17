@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/redis/go-redis/v9"
 )
 
 // --- ConnectionManager ---
@@ -32,8 +32,6 @@ var (
 type Order struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
-	SKU   string `json:"sku"`
-	Qty   int    `json:"qty"`
 }
 
 // --- Initialization ---
@@ -81,9 +79,6 @@ func (c *ConnectionManager) monitorConnection() {
 	for {
 		if err := c.connect(); err == nil {
 			log.Println("Successfully reconnected to RabbitMQ.")
-			// After reconnecting, we must restart the consumer.
-			// A simple approach for a worker is to log a fatal error
-			// and let the container orchestrator (Docker/Kubernetes) restart it.
 			log.Fatal("Reconnected to RabbitMQ, but consumer needs to be restarted. Shutting down.")
 			return
 		}
@@ -102,6 +97,12 @@ func (c *ConnectionManager) connect() error {
 		if err == nil {
 			ch, err := conn.Channel()
 			if err == nil {
+				// Declare the topic exchange we consume from
+				err = ch.ExchangeDeclare("orders.topic", "topic", true, false, false, false, nil)
+				if err != nil {
+					log.Printf("Failed to declare exchange at %s: %v", url, err)
+					continue
+				}
 				c.connection = conn
 				c.channel = ch
 				return nil // Success
@@ -140,34 +141,18 @@ func connectToRedis() {
 	log.Println("Successfully connected to Redis.")
 }
 
-// setupRabbitMQ declares exchanges, queues, and bindings.
+// setupRabbitMQ declares queues and bindings for the notifier.
 func setupRabbitMQ(ch *amqp.Channel) error {
-	// Declare the exchange we receive messages from
-	err := ch.ExchangeDeclare("orders.direct", "direct", true, false, false, false, nil)
+	q, err := ch.QueueDeclare("notifier.queue", true, false, false, false, nil)
 	if err != nil {
 		return err
 	}
 
-	// Declare the queue for orders
-	_, err = ch.QueueDeclare("orders.queue", true, false, false, false, nil)
+	err = ch.QueueBind(q.Name, "order.created", "orders.topic", false, nil)
 	if err != nil {
 		return err
 	}
 
-	// Bind the queue to the exchange
-	err = ch.QueueBind("orders.queue", "", "orders.direct", false, nil)
-	if err != nil {
-		return err
-	}
-
-	// Declare the topic exchange we publish events to
-	err = ch.ExchangeDeclare("orders.topic", "topic", true, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-
-	// Set a Quality of Service: process up to 10 messages at a time.
-	// This prevents the worker from being overwhelmed.
 	return ch.Qos(10, 0, false)
 }
 
@@ -182,15 +167,14 @@ func main() {
 		log.Fatalf("Failed to set up RabbitMQ: %v", err)
 	}
 
-	// Start consuming messages from the queue
 	msgs, err := ch.Consume(
-		"orders.queue", // queue
-		"",             // consumer
-		false,          // auto-ack
-		false,          // exclusive
-		false,          // no-local
-		false,          // no-wait
-		nil,            // args
+		"notifier.queue",
+		"",
+		false,
+		false,
+		false,
+		false,
+		nil,
 	)
 	if err != nil {
 		log.Fatalf("Failed to register a consumer: %v", err)
@@ -198,77 +182,51 @@ func main() {
 
 	forever := make(chan struct{})
 
-	log.Println("Order Processor started. Waiting for messages...")
+	log.Println("Notifier service started. Waiting for messages...")
 
 	go func() {
 		for d := range msgs {
-			processOrder(d)
+			processNotification(d)
 		}
 	}()
 
-	<-forever // Block forever
+	<-forever
 }
 
-// processOrder is the core logic for handling a single order message.
-func processOrder(d amqp.Delivery) {
+// processNotification handles a single notification message.
+func processNotification(d amqp.Delivery) {
 	var order Order
 	if err := json.Unmarshal(d.Body, &order); err != nil {
-		log.Printf("Error unmarshalling message: %s", err)
-		d.Nack(false, false) // Nack without requeue for bad messages
+		log.Printf("Error decoding message: %s", err)
+		d.Nack(false, false)
 		return
 	}
 
-	log.Printf("Received order %s for %s: SKU %s, Qty %d", order.ID, order.Email, order.SKU, order.Qty)
-
-	// --- Update Inventory in Redis ---
 	ctx := context.Background()
-	inventoryKey := "inventory:" + order.SKU
-	err := rdb.DecrBy(ctx, inventoryKey, int64(order.Qty)).Err()
+	key := "notif:" + order.ID
+	ok, err := rdb.SetNX(ctx, key, "1", 24*time.Hour).Result()
 	if err != nil {
-		log.Printf("Failed to update inventory for SKU %s: %v", order.SKU, err)
-		d.Nack(true, false) // Nack and requeue on processing failure
+		log.Printf("Redis error: %s", err)
+		d.Nack(false, true) // Requeue on Redis error
 		return
 	}
-	log.Printf("Decremented inventory for SKU %s by %d", order.SKU, order.Qty)
 
-	// --- Publish Downstream Event ---
-	publishOrderCreatedEvent(ctx, order)
+	if !ok {
+		log.Printf("Notification for order %s already processed.", order.ID)
+		d.Ack(false)
+		return
+	}
 
-	// Acknowledge the message to remove it from the queue
+	log.Printf("Sending notification for order %s to %s", order.ID, order.Email)
+	// Simulate sending email
+	time.Sleep(1 * time.Second)
+
+	err = rdb.HSet(ctx, "notifications:"+order.ID, "status", "sent").Err()
+	if err != nil {
+		log.Printf("Failed to update notification status in Redis: %s", err)
+		// Don't requeue, as the notification was already sent
+	}
+
+	log.Printf("Notification sent for order %s", order.ID)
 	d.Ack(false)
-}
-
-// publishOrderCreatedEvent publishes a message to the topic exchange.
-func publishOrderCreatedEvent(ctx context.Context, order Order) {
-	ch := cm.GetChannel()
-	if ch == nil {
-		log.Printf("Cannot publish event for order %s: channel is not available", order.ID)
-		return
-	}
-
-	body, err := json.Marshal(order)
-	if err != nil {
-		log.Printf("Failed to marshal event for order %s: %v", order.ID, err)
-		return
-	}
-
-	err = ch.PublishWithContext(ctx,
-		"orders.topic",    // exchange
-		"order.created",   // routing key
-		false,             // mandatory
-		false,             // immediate
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			Body:         body,
-		})
-
-	if err != nil {
-		log.Printf("Failed to publish order.created event for order %s: %v", order.ID, err)
-		// Note: In a real system, you'd need a robust outbox pattern here
-		// to handle failures in publishing downstream events.
-		return
-	}
-
-	log.Printf("Published 'order.created' event for order %s", order.ID)
 }

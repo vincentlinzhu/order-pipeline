@@ -31,9 +31,10 @@ var (
 
 // --- Order Struct ---
 type Order struct {
-	ID  string `json:"id"`
-	SKU string `json:"sku"`
-	Qty int    `json:"qty"`
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	SKU   string `json:"sku"`
+	Qty   int    `json:"qty"`
 }
 
 // --- Initialization ---
@@ -166,7 +167,7 @@ func handleOrders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if o.ID == "" || o.SKU == "" || o.Qty <= 0 {
+	if o.ID == "" || o.Email == "" || o.SKU == "" || o.Qty <= 0 {
 		http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
 		return
 	}

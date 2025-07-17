@@ -53,8 +53,8 @@ services:
       - redis
     networks:
       - order_pipeline_net
-    env_file:
-      - ./.env
+    volumes:
+      - ./.env:/app/.env:ro
 
   # --- Order Processor ---
   order-processor:
@@ -65,5 +65,17 @@ services:
       - redis
     networks:
       - order_pipeline_net
-    env_file:
-      - ./.env
+    volumes:
+      - ./.env:/app/.env:ro
+
+  # --- Notifier ---
+  notifier:
+    build: ./notifier
+    depends_on:
+      - rabbitmq1
+      - rabbitmq2
+      - redis
+    networks:
+      - order_pipeline_net
+    volumes:
+      - ./.env:/app/.env:ro
