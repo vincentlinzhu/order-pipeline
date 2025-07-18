@@ -14,6 +14,13 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+// --- Interfaces for Mocking ---
+
+type RedisClient interface {
+	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
+	HSet(ctx context.Context, key string, values ...interface{}) *redis.IntCmd
+}
+
 // --- ConnectionManager ---
 type ConnectionManager struct {
 	urls       []string
@@ -32,6 +39,11 @@ var (
 type Order struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
+}
+
+// --- Notifier ---
+type Notifier struct {
+	redisClient RedisClient
 }
 
 // --- Initialization ---
@@ -97,7 +109,6 @@ func (c *ConnectionManager) connect() error {
 		if err == nil {
 			ch, err := conn.Channel()
 			if err == nil {
-				// Declare the topic exchange we consume from
 				err = ch.ExchangeDeclare("orders.topic", "topic", true, false, false, false, nil)
 				if err != nil {
 					log.Printf("Failed to declare exchange at %s: %v", url, err)
@@ -105,7 +116,7 @@ func (c *ConnectionManager) connect() error {
 				}
 				c.connection = conn
 				c.channel = ch
-				return nil // Success
+				return nil
 			}
 			conn.Close()
 		}
@@ -147,12 +158,10 @@ func setupRabbitMQ(ch *amqp.Channel) error {
 	if err != nil {
 		return err
 	}
-
 	err = ch.QueueBind(q.Name, "order.created", "orders.topic", false, nil)
 	if err != nil {
 		return err
 	}
-
 	return ch.Qos(10, 0, false)
 }
 
@@ -167,34 +176,25 @@ func main() {
 		log.Fatalf("Failed to set up RabbitMQ: %v", err)
 	}
 
-	msgs, err := ch.Consume(
-		"notifier.queue",
-		"",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
+	msgs, err := ch.Consume("notifier.queue", "", false, false, false, false, nil)
 	if err != nil {
 		log.Fatalf("Failed to register a consumer: %v", err)
 	}
 
+	notifier := &Notifier{redisClient: rdb}
+
 	forever := make(chan struct{})
-
 	log.Println("Notifier service started. Waiting for messages...")
-
 	go func() {
 		for d := range msgs {
-			processNotification(d)
+			notifier.processNotification(d)
 		}
 	}()
-
 	<-forever
 }
 
 // processNotification handles a single notification message.
-func processNotification(d amqp.Delivery) {
+func (n *Notifier) processNotification(d amqp.Delivery) {
 	var order Order
 	if err := json.Unmarshal(d.Body, &order); err != nil {
 		log.Printf("Error decoding message: %s", err)
@@ -204,10 +204,10 @@ func processNotification(d amqp.Delivery) {
 
 	ctx := context.Background()
 	key := "notif:" + order.ID
-	ok, err := rdb.SetNX(ctx, key, "1", 24*time.Hour).Result()
+	ok, err := n.redisClient.SetNX(ctx, key, "1", 24*time.Hour).Result()
 	if err != nil {
 		log.Printf("Redis error: %s", err)
-		d.Nack(false, true) // Requeue on Redis error
+		d.Nack(false, true)
 		return
 	}
 
@@ -218,13 +218,11 @@ func processNotification(d amqp.Delivery) {
 	}
 
 	log.Printf("Sending notification for order %s to %s", order.ID, order.Email)
-	// Simulate sending email
 	time.Sleep(1 * time.Second)
 
-	err = rdb.HSet(ctx, "notifications:"+order.ID, "status", "sent").Err()
+	err = n.redisClient.HSet(ctx, "notifications:"+order.ID, "status", "sent").Err()
 	if err != nil {
 		log.Printf("Failed to update notification status in Redis: %s", err)
-		// Don't requeue, as the notification was already sent
 	}
 
 	log.Printf("Notification sent for order %s", order.ID)

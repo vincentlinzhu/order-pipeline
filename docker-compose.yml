@@ -79,3 +79,15 @@ services:
       - order_pipeline_net
     volumes:
       - ./.env:/app/.env:ro
+
+  # --- Dashboard ---
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - order_pipeline_net
+    volumes:
+      - ./.env:/app/.env:ro

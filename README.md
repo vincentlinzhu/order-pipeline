@@ -67,7 +67,7 @@ order-pipeline/
 1. Clone the repo and navigate into it:
 
    ```bash
-   git clone git@github.com:your-org/order-pipeline.git
+   git clone git@github.com:vincentlinzhu/order-pipeline.git
    cd order-pipeline
    ```
 2. Start RabbitMQ & Redis:
@@ -159,7 +159,7 @@ You can place an order by sending a `POST` request to the `/orders` endpoint.
 ```bash
 curl -X POST http://localhost:8080/orders \
      -H "Content-Type: application/json" \
-     -d '{"id":"order123","sku":"mag-safe-phone-case","qty":2}
+     -d '{"id":"order123","email":"customer@example.com","sku":"mag-safe-phone-case","qty":2}'
 ```
 
 Expected Output:
@@ -176,7 +176,7 @@ Running the exact same command a second time will trigger the idempotency check.
 ```bash
 curl -X POST http://localhost:8080/orders \
      -H "Content-Type: application/json" \
-     -d '{"id":"order123","sku":"mag-safe-phone-case","qty":2}
+     -d '{"id":"order123","email":"customer@example.com","sku":"mag-safe-phone-case","qty":2}'
 ```
 
 Expected Output:
@@ -186,7 +186,27 @@ Duplicate order
 
 This confirms that the system correctly identified and rejected the duplicate request based on the order `id`.
 
+### Monitoring with the Dashboard
+
+The dashboard service provides metrics on port `8081`.
+
+**Get total processed orders:**
+```bash
+curl http://localhost:8081/metrics
+```
+
+**Check inventory for a specific SKU:**
+```bash
+curl http://localhost:8081/metrics?sku=mag-safe-phone-case
+```
+
+**Check the notification status for an order:**
+```bash
+curl http://localhost:8081/metrics?order_id=order123
+```
+
 ### Shutdown the application
+
 
 To shut down the application, press `Ctrl+C` in the terminal where `docker-compose up` is running. This will stop the containers. After that, run the following command to remove the containers and networks created by `docker-compose`:
 
@@ -222,12 +242,13 @@ docker-compose down
     *   Simulate sending notification (log/email stub)
     *   Record status in Redis hash
 
-### Dashboard (Optional)
+### Dashboard Service
 
-*   **Endpoint:** `GET /metrics`
+*   **Endpoint:** `GET /metrics` on port `:8081`
 *   **Responsibilities:**
-    *   Fetch cached metrics from Redis (order count, inventory levels, notification status)
-    *   Serve JSON response for monitoring
+    *   Provides a read-only view into the system's state.
+    *   Fetches metrics directly from Redis, such as total processed orders, inventory levels, and notification statuses.
+
 
 ## High Availability and Resilience
 
@@ -244,9 +265,29 @@ This setup ensures that the API Gateway can survive temporary network partitions
 
 ## Testing & CI
 
-*   Unit tests with mocks (interfaces for RabbitMQ/Redis)
-*   Integration tests via \[Testcontainers-Go]
-*   GitHub Actions workflow spins up Redis & RabbitMQ services, then runs `go test ./...`
+This project is configured with a full suite of unit tests and a Continuous Integration (CI) pipeline using GitHub Actions.
+
+### Running Tests Locally
+
+The services have been refactored using interfaces and dependency injection to allow for robust unit testing with mocks. To run all tests for all services, execute the following command from the project root:
+
+```bash
+go test ./...
+```
+This command will discover and run all `*_test.go` files in the project. It will also download any necessary test dependencies like `testify`.
+
+### CI Pipeline
+
+The CI pipeline is defined in `.github/workflows/ci.yml`. It automatically triggers on every `push` and `pull_request` to the repository.
+
+The pipeline performs the following steps:
+1.  Spins up a clean Ubuntu environment.
+2.  Starts background service containers for Redis and RabbitMQ.
+3.  Checks out the repository code.
+4.  Sets up the correct Go version.
+5.  Runs the `go test ./...` command.
+
+If any test fails, the pipeline will fail, providing immediate feedback on the code changes.
 
 ## Deployment
 
