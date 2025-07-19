@@ -65,6 +65,8 @@ func TestProcessNotification_Success(t *testing.T) {
 
 	// Define expectations
 	mockRedis.On("SetNX", mock.Anything, "notif:123", "1", 24*time.Hour).Return(true, nil)
+	// The HSet method receives a variadic ...interface{}, which the mock framework
+	// treats as a slice. We must match that slice explicitly.
 	mockRedis.On("HSet", mock.Anything, "notifications:123", []interface{}{"status", "sent"}).Return(nil)
 
 	order := Order{ID: "123", Email: "test@test.com"}

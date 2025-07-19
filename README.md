@@ -4,10 +4,7 @@ A simple event-driven microservices project built with Go, Redis, and RabbitMQ. 
 
 Next Steps:
 - Add a proper database like PostgreSQL or Cassandra DB and use a cache scheme (aside, read back, write around, write through, etc) to interact with the redis cache.
-- Add a network layer (an http server). Ask Wangster about this?
 - Change docker compose to Kubernetes for more modern approach to this architecture.
-- Maybe add a load balancer if needed?
-- I want to incorporate an Agentic webscraper and MCP (connect to proper datastore). Maybe an agentic shopping bot that orders off of Amazon for you. Maybe change decrement inventory to increment a shopping list. Use AI to handle natural language conversion of user input to actual item on Amazon. This will probably require user authentication, so each user can have an orders list. We want to keep the CLI for the oders through to be techy ;)
 
 ## Table of Contents
 
@@ -150,16 +147,56 @@ docker exec order-pipeline-redis-1 redis-cli SET inventory:mag-safe-phone-case 1
 docker exec order-pipeline-redis-1 redis-cli GET inventory:mag-safe-phone-case
 ```
 
-### Placing an Order
+### Placing an Order (with Authentication)
 
-You can place an order by sending a `POST` request to the `/orders` endpoint.
+With the addition of user authentication, placing an order is now a three-step process:
+1.  **Register** a new user.
+2.  **Login** with the user's credentials to receive a JWT authentication token.
+3.  **Place the order** by sending the request with the JWT in the `Authorization` header.
 
-**1. Send a New Order**
+**1. Register a New User**
+
+Send a `POST` request to the `/register` endpoint with an email and password.
 
 ```bash
+curl -X POST http://localhost:8080/register \
+     -H "Content-Type: application/json" \
+     -d '{"email":"customer@example.com","password":"securepassword123"}'
+```
+
+Expected Output:
+```
+User registered successfully
+```
+
+**2. Log In to Get a Token**
+
+Send a `POST` request to the `/login` endpoint with the same credentials.
+
+```bash
+curl -X POST http://localhost:8080/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"customer@example.com","password":"securepassword123"}'
+```
+
+Expected Output (the token will be different each time):
+```json
+{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImN1c3RvbWVyQGV4YW1wbGUuY29tIiwiZXhwIjoxNzIxMzg5MjQxfQ.SomeTokenSignature"}
+```
+
+**3. Place the Order with the Token**
+
+Copy the token from the login response and use it in the `Authorization` header of your order request.
+
+> **Note:** Replace `<your_jwt_token>` with the actual token you received.
+
+```bash
+TOKEN="<your_jwt_token>"
+
 curl -X POST http://localhost:8080/orders \
      -H "Content-Type: application/json" \
-     -d '{"id":"order123","email":"customer@example.com","sku":"mag-safe-phone-case","qty":2}'
+     -H "Authorization: Bearer $TOKEN" \
+     -d '{"id":"order123","sku":"mag-safe-phone-case","qty":2}'
 ```
 
 Expected Output:
@@ -167,24 +204,17 @@ Expected Output:
 Order received: order123
 ```
 
-This indicates the order was accepted by the API Gateway and published for processing.
+**4. Send the Same Order Again (Idempotency Check)**
 
-**2. Send the Same Order Again**
-
-Running the exact same command a second time will trigger the idempotency check.
-
-```bash
-curl -X POST http://localhost:8080/orders \
-     -H "Content-Type: application/json" \
-     -d '{"id":"order123","email":"customer@example.com","sku":"mag-safe-phone-case","qty":2}'
-```
+If you run the exact same `curl` command from Step 3 again, the idempotency check will prevent a duplicate order.
 
 Expected Output:
 ```
 Duplicate order
 ```
 
-This confirms that the system correctly identified and rejected the duplicate request based on the order `id`.
+This confirms that the system correctly authenticates the user and processes the order while still preventing duplicates.
+
 
 ### Monitoring with the Dashboard
 
@@ -250,6 +280,27 @@ docker-compose down
     *   Fetches metrics directly from Redis, such as total processed orders, inventory levels, and notification statuses.
 
 
+## Authentication
+
+The application uses a robust, token-based authentication system to secure endpoints and manage users.
+
+### Key Technologies & Methodologies
+
+*   **JWT (JSON Web Tokens):** Authentication is handled using JWTs. After a user successfully logs in, the API Gateway generates a signed JWT (using HS256) that contains the user's email and an expiration time. This token must be included in the `Authorization` header for all subsequent requests to protected endpoints. This approach ensures stateless authentication, as the server does not need to store session information.
+
+*   **Cassandra for User Storage:** User credentials, including their email and a securely hashed password, are stored in a Cassandra database. The `users_keyspace.users` table is used for this purpose.
+
+*   **bcrypt for Password Hashing:** To ensure password security, all user passwords are hashed using the `bcrypt` library before being stored in the database. This one-way hashing algorithm is resistant to rainbow table and brute-force attacks.
+
+*   **Authentication Middleware:** A dedicated middleware is applied to sensitive routes (like `/orders` and `/delete-user`). This middleware inspects incoming requests for a valid JWT, verifies its signature and expiration, and extracts the user's identity. If the token is valid, the user's email is added to the request context for use by the handler. If the token is missing or invalid, the middleware rejects the request with an appropriate HTTP error (401 Unauthorized or 403 Forbidden).
+
+### Authentication Endpoints
+
+*   `POST /register`: Creates a new user in the database.
+*   `POST /login`: Authenticates a user and returns a JWT.
+*   `DELETE /delete-user`: Deletes the authenticated user (requires a valid JWT).
+
+
 ## High Availability and Resilience
 
 The API Gateway has been designed to be highly resilient to failures in its downstream dependencies, specifically RabbitMQ.
@@ -272,7 +323,7 @@ This project is configured with a full suite of unit tests and a Continuous Inte
 The services have been refactored using interfaces and dependency injection to allow for robust unit testing with mocks. To run all tests for all services, execute the following command from the project root:
 
 ```bash
-go test ./...
+go test ./api-gateway/... ./order-processor/... ./notifier/...
 ```
 This command will discover and run all `*_test.go` files in the project. It will also download any necessary test dependencies like `testify`.
 
@@ -285,7 +336,7 @@ The pipeline performs the following steps:
 2.  Starts background service containers for Redis and RabbitMQ.
 3.  Checks out the repository code.
 4.  Sets up the correct Go version.
-5.  Runs the `go test ./...` command.
+5.  Runs the `go test ./api-gateway/... ./order-processor/... ./notifier/...` command.
 
 If any test fails, the pipeline will fail, providing immediate feedback on the code changes.
 

@@ -23,14 +23,22 @@ type RedisClient interface {
 
 type RabbitChannel interface {
 	PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error
+	Qos(prefetchCount, prefetchSize int, global bool) error
+	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
+	ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp.Table) error
+	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
+	QueueBind(name, key, exchange string, noWait bool, args amqp.Table) error
 }
 
 // --- ConnectionManager ---
 type ConnectionManager struct {
-	urls       []string
-	connection *amqp.Connection
-	channel    RabbitChannel
-	mu         sync.RWMutex
+	urls         []string
+	connection   *amqp.Connection
+	channel      *amqp.Channel
+	mu           sync.RWMutex
+	isConnecting bool
+	reconnected  chan struct{} // Channel to signal successful reconnection
+	shutdown     chan struct{} // Channel to signal shutdown
 }
 
 // --- Global Variables ---
@@ -53,81 +61,85 @@ type Processor struct {
 	rabbitChannel RabbitChannel
 }
 
-// --- Initialization ---
-func init() {
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using default environment variables")
-	}
-
-	connectToRedis()
-
-	rabbitmqURLs := os.Getenv("RABBITMQ_URLS")
-	if rabbitmqURLs == "" {
-		rabbitmqURLs = "amqp://guest:guest@localhost:5672/"
-	}
-	cm = NewConnectionManager(strings.Split(rabbitmqURLs, ","))
-
-	log.Println("Attempting initial connection to RabbitMQ...")
-	for {
-		if err := cm.connect(); err == nil {
-			log.Println("Initial RabbitMQ connection established.")
-			break
-		}
-		log.Println("Initial RabbitMQ connection failed, retrying in 5 seconds...")
-		time.Sleep(5 * time.Second)
-	}
-
-	go cm.monitorConnection()
-}
-
 // NewConnectionManager creates a new connection manager.
 func NewConnectionManager(urls []string) *ConnectionManager {
 	return &ConnectionManager{
-		urls: urls,
+		urls:        urls,
+		reconnected: make(chan struct{}, 1), // Buffered channel of size 1
+		shutdown:    make(chan struct{}),
+	}
+}
+
+// connect attempts to connect to RabbitMQ with a timeout.
+func (c *ConnectionManager) connect() error {
+	c.mu.Lock()
+	if c.isConnecting {
+		c.mu.Unlock()
+		return nil // Avoid concurrent connection attempts
+	}
+	c.isConnecting = true
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.isConnecting = false
+		c.mu.Unlock()
+	}()
+
+	for {
+		select {
+		case <-c.shutdown:
+			return nil
+		default:
+			for _, url := range c.urls {
+				log.Printf("Attempting to connect to RabbitMQ at %s...", url)
+				conn, err := amqp.DialConfig(url, amqp.Config{
+					Dial: amqp.DefaultDial(5 * time.Second), // 5-second timeout
+				})
+				if err == nil {
+					ch, err := conn.Channel()
+					if err == nil {
+						c.mu.Lock()
+						c.connection = conn
+						c.channel = ch
+						c.mu.Unlock()
+						log.Printf("Successfully connected to RabbitMQ at %s", url)
+
+						// Signal successful connection/reconnection
+						select {
+						case c.reconnected <- struct{}{}:
+						default: // Avoid blocking if the channel is full
+						}
+
+						go c.monitorConnection()
+						return nil
+					}
+					log.Printf("Failed to open a channel at %s: %v", url, err)
+					conn.Close()
+				} else {
+					log.Printf("Failed to dial RabbitMQ at %s: %v", url, err)
+				}
+			}
+			log.Println("All RabbitMQ connection attempts failed, retrying in 5 seconds...")
+			time.Sleep(5 * time.Second)
+		}
 	}
 }
 
 // monitorConnection runs in the background to handle reconnects.
 func (c *ConnectionManager) monitorConnection() {
 	closeChan := make(chan *amqp.Error)
-	c.connection.NotifyClose(closeChan)
+	c.GetConnection().NotifyClose(closeChan)
 
 	err := <-closeChan
-	log.Printf("RabbitMQ connection lost: %v. Starting reconnection process...", err)
-
-	for {
-		if err := c.connect(); err == nil {
-			log.Println("Successfully reconnected to RabbitMQ.")
-			log.Fatal("Reconnected to RabbitMQ, but consumer needs to be restarted. Shutting down.")
-			return
-		}
-		log.Println("RabbitMQ reconnection failed, retrying in 5 seconds...")
-		time.Sleep(5 * time.Second)
+	if err != nil {
+		log.Printf("RabbitMQ connection lost: %v. Starting reconnection process...", err)
+		c.connect() // Start reconnection process
 	}
-}
-
-// connect attempts to connect to RabbitMQ.
-func (c *ConnectionManager) connect() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, url := range c.urls {
-		conn, err := amqp.Dial(url)
-		if err == nil {
-			ch, err := conn.Channel()
-			if err == nil {
-				c.connection = conn
-				c.channel = ch
-				return nil // Success
-			}
-			conn.Close()
-		}
-	}
-	return amqp.ErrClosed
 }
 
 // GetChannel provides thread-safe access to the channel.
-func (c *ConnectionManager) GetChannel() RabbitChannel {
+func (c *ConnectionManager) GetChannel() *amqp.Channel {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.channel
@@ -138,6 +150,19 @@ func (c *ConnectionManager) GetConnection() *amqp.Connection {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.connection
+}
+
+// Close gracefully shuts down the connection manager.
+func (c *ConnectionManager) Close() {
+	close(c.shutdown)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.channel != nil {
+		c.channel.Close()
+	}
+	if c.connection != nil {
+		c.connection.Close()
+	}
 }
 
 // --- Redis Connection ---
@@ -156,47 +181,72 @@ func connectToRedis() {
 
 // setupRabbitMQ declares exchanges, queues, and bindings.
 func setupRabbitMQ(ch RabbitChannel) error {
-	// This is a type assertion. We need the underlying amqp.Channel to declare exchanges and queues.
-	// This part of the setup is not easily mockable without more complex interfaces.
-	realCh, ok := ch.(*amqp.Channel)
-	if !ok {
-		log.Fatal("setupRabbitMQ requires a real *amqp.Channel")
-	}
-
-	err := realCh.ExchangeDeclare("orders.direct", "direct", true, false, false, false, nil)
+	err := ch.ExchangeDeclare("orders.direct", "direct", true, false, false, false, nil)
 	if err != nil {
 		return err
 	}
-	_, err = realCh.QueueDeclare("orders.queue", true, false, false, false, nil)
+	_, err = ch.QueueDeclare("orders.queue", true, false, false, false, nil)
 	if err != nil {
 		return err
 	}
-	err = realCh.QueueBind("orders.queue", "", "orders.direct", false, nil)
+	err = ch.QueueBind("orders.queue", "", "orders.direct", false, nil)
 	if err != nil {
 		return err
 	}
-	err = realCh.ExchangeDeclare("orders.topic", "topic", true, false, false, false, nil)
+	err = ch.ExchangeDeclare("orders.topic", "topic", true, false, false, false, nil)
 	if err != nil {
 		return err
 	}
-	return realCh.Qos(10, 0, false)
+	return ch.Qos(10, 0, false)
 }
 
 // --- Main Function ---
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using default environment variables")
+	}
+
+	connectToRedis()
+
+	rabbitmqURLs := os.Getenv("RABBITMQ_URLS")
+	if rabbitmqURLs == "" {
+		rabbitmqURLs = "amqp://guest:guest@localhost:5672/"
+	}
+	cm = NewConnectionManager(strings.Split(rabbitmqURLs, ","))
+	go cm.connect() // Start connection manager in the background
+
+	// Main application loop
+	for {
+		// Wait for a connection signal before trying to run the consumer
+		<-cm.reconnected
+
+		select {
+		case <-cm.shutdown:
+			log.Println("Shutting down processor.")
+			return
+		default:
+			runConsumer()
+		}
+	}
+}
+
+// runConsumer sets up and runs the message consumer loop.
+func runConsumer() {
 	ch := cm.GetChannel()
 	if ch == nil {
-		log.Fatal("Failed to get RabbitMQ channel.")
+		log.Println("Cannot run consumer, channel is not available.")
+		return
 	}
 
 	if err := setupRabbitMQ(ch); err != nil {
-		log.Fatalf("Failed to set up RabbitMQ: %v", err)
+		log.Printf("Failed to set up RabbitMQ: %v. Retrying...", err)
+		return // Exit and let the main loop handle reconnection wait
 	}
 
-	realCh, _ := ch.(*amqp.Channel)
-	msgs, err := realCh.Consume("orders.queue", "", false, false, false, false, nil)
+	msgs, err := ch.Consume("orders.queue", "order-processor", false, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Failed to register a consumer: %v", err)
+		log.Printf("Failed to register a consumer: %v. Retrying...", err)
+		return // Exit and let the main loop handle reconnection wait
 	}
 
 	processor := &Processor{
@@ -204,14 +254,11 @@ func main() {
 		rabbitChannel: ch,
 	}
 
-	forever := make(chan struct{})
 	log.Println("Order Processor started. Waiting for messages...")
-	go func() {
-		for d := range msgs {
-			processor.processOrder(d)
-		}
-	}()
-	<-forever
+	for d := range msgs {
+		processor.processOrder(d)
+	}
+	log.Println("Consumer loop finished.") // This will be logged if the channel is closed
 }
 
 // processOrder is the core logic for handling a single order message.
@@ -229,7 +276,7 @@ func (p *Processor) processOrder(d amqp.Delivery) {
 	inventoryKey := "inventory:" + order.SKU
 	if err := p.redisClient.DecrBy(ctx, inventoryKey, int64(order.Qty)).Err(); err != nil {
 		log.Printf("Failed to update inventory for SKU %s: %v", order.SKU, err)
-		d.Nack(true, false)
+		d.Nack(true, false) // Requeue the message
 		return
 	}
 	log.Printf("Decremented inventory for SKU %s by %d", order.SKU, order.Qty)
@@ -258,6 +305,7 @@ func (p *Processor) publishOrderCreatedEvent(ctx context.Context, order Order) {
 		})
 	if err != nil {
 		log.Printf("Failed to publish order.created event for order %s: %v", order.ID, err)
+	} else {
+		log.Printf("Published 'order.created' event for order %s", order.ID)
 	}
-	log.Printf("Published 'order.created' event for order %s", order.ID)
 }

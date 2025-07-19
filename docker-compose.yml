@@ -91,3 +91,25 @@ services:
       - order_pipeline_net
     volumes:
       - ./.env:/app/.env:ro
+
+  cassandra:
+    image: cassandra:4.0
+    hostname: cassandra
+    ports:
+      - "9042:9042" # CQL native port
+    environment:
+      # Simple authentication for development
+      - CASSANDRA_AUTHENTICATOR=PasswordAuthenticator
+      - CASSANDRA_AUTHORIZER=AllowAllAuthorizer
+      - CASSANDRA_USERNAME=cassandra
+      - CASSANDRA_PASSWORD=cassandra
+    networks:
+      - order_pipeline_net
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+
+# The 'volumes' section is for persistent data, though not strictly needed for this example.
+volumes:
+  rabbitmq_data:
+  redis_data:
+  cassandra_data:

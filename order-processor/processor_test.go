@@ -34,6 +34,7 @@ func (m *MockRedisClient) Incr(ctx context.Context, key string) *redis.IntCmd {
 	return cmd
 }
 
+// MockRabbitChannel now implements the full RabbitChannel interface.
 type MockRabbitChannel struct {
 	mock.Mock
 }
@@ -42,6 +43,41 @@ func (m *MockRabbitChannel) PublishWithContext(ctx context.Context, exchange, ke
 	args := m.Called(ctx, exchange, key, mandatory, immediate, msg)
 	return args.Error(0)
 }
+
+func (m *MockRabbitChannel) Qos(prefetchCount, prefetchSize int, global bool) error {
+	args := m.Called(prefetchCount, prefetchSize, global)
+	return args.Error(0)
+}
+
+func (m *MockRabbitChannel) Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
+	callArgs := m.Called(queue, consumer, autoAck, exclusive, noLocal, noWait, args)
+	var deliveryChan chan amqp.Delivery
+	if c, ok := callArgs.Get(0).(chan amqp.Delivery); ok {
+		deliveryChan = c
+	}
+	return deliveryChan, callArgs.Error(1)
+}
+
+func (m *MockRabbitChannel) ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp.Table) error {
+	callArgs := m.Called(name, kind, durable, autoDelete, internal, noWait, args)
+	return callArgs.Error(0)
+}
+
+func (m *MockRabbitChannel) QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error) {
+	callArgs := m.Called(name, durable, autoDelete, exclusive, noWait, args)
+	// Ensure we return a valid amqp.Queue struct even if it's empty
+	var queue amqp.Queue
+	if q, ok := callArgs.Get(0).(amqp.Queue); ok {
+		queue = q
+	}
+	return queue, callArgs.Error(1)
+}
+
+func (m *MockRabbitChannel) QueueBind(name, key, exchange string, noWait bool, args amqp.Table) error {
+	callArgs := m.Called(name, key, exchange, noWait, args)
+	return callArgs.Error(0)
+}
+
 
 // MockAcker correctly implements the amqp.Acknowledger interface for testing.
 type MockAcker struct {
